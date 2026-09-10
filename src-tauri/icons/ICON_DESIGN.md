@@ -1,0 +1,1 @@
+Synth Studio app icon: a minimal five-bar synth/equalizer mark on a warm white tile, matching the light-first interface.
