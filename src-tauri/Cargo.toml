@@ -1,6 +1,6 @@
 [package]
 name = "synth-studio"
-version = "0.2.0"
+version = "0.3.0"
 description = "Synth Studio - lightweight local AI workspace by Fulltrack"
 authors = ["Fulltrack"]
 edition = "2021"
@@ -21,6 +21,7 @@ tauri-build = "2.6"
 tauri = { version = "2.11.2", features = [] }
 tauri-plugin-dialog = "2.6"
 tauri-plugin-fs = "2.4"
+tauri-plugin-global-shortcut = "2.3.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
