@@ -41,13 +41,7 @@ pub struct SystemStats {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GenerationResult {
-    pub text: String,
-    pub tokens: usize,
-    pub seconds: f64,
-    pub tokens_per_sec: f64,
-    pub cancelled: bool,
-}
+pub struct GenerationResult { pub text: String, pub tokens: usize, pub seconds: f64, pub tokens_per_sec: f64, pub cancelled: bool }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,7 +73,10 @@ pub fn system_stats() -> SystemStats {
     let used = system.used_memory() / 1024 / 1024;
     let pid = sysinfo::Pid::from_u32(std::process::id());
     let process_memory = system.process(pid).map(|p| p.memory() / 1024 / 1024).unwrap_or(0);
-    SystemStats { cpu_usage: system.global_cpu_usage(), memory_used_mb: used, memory_total_mb: total, process_memory_mb: process_memory, gpu_available: false, gpu_note: "CPU Candle backend is bundled by default. NVIDIA CUDA is an optional build feature.".into() }
+    SystemStats {
+        cpu_usage: system.global_cpu_usage(), memory_used_mb: used, memory_total_mb: total, process_memory_mb: process_memory,
+        gpu_available: false, gpu_note: "Candle CPU backend is bundled by default. CUDA is an optional build feature.".into(),
+    }
 }
 
 #[tauri::command]
@@ -105,7 +102,11 @@ fn inspect_model_inner(path: &Path) -> Result<ModelInfo> {
 fn has_embedded_tokenizer(content: &gguf_file::Content) -> bool {
     ["tokenizer.huggingface.json", "tokenizer.ggml.hf_json", "tokenizer.huggingface.tokenizer_json"].iter().any(|key| content.metadata.get(*key).and_then(|v| v.to_string().ok()).is_some())
 }
-
+fn sidecar_tokenizer(model_path: &Path) -> Option<PathBuf> {
+    let parent = model_path.parent().unwrap_or_else(|| Path::new("."));
+    let stem = model_path.file_stem()?.to_string_lossy();
+    [parent.join("tokenizer.json"), parent.join(format!("{}.tokenizer.json", stem))].into_iter().find(|p| p.is_file())
+}
 fn load_tokenizer(content: &gguf_file::Content, model_path: &Path) -> Result<Tokenizer> {
     for key in ["tokenizer.huggingface.json", "tokenizer.ggml.hf_json", "tokenizer.huggingface.tokenizer_json"] {
         if let Some(json) = content.metadata.get(key).and_then(|v| v.to_string().ok()) { return Tokenizer::from_bytes(json.as_bytes()).map_err(|e| anyhow::anyhow!(e.to_string())); }
@@ -113,15 +114,8 @@ fn load_tokenizer(content: &gguf_file::Content, model_path: &Path) -> Result<Tok
     if let Some(sidecar) = sidecar_tokenizer(model_path) { return Tokenizer::from_file(sidecar).map_err(|e| anyhow::anyhow!(e.to_string())); }
     bail!("No tokenizer found. Put tokenizer.json beside the GGUF (or <model>.tokenizer.json) and retry.")
 }
-
-fn sidecar_tokenizer(model_path: &Path) -> Option<PathBuf> {
-    let parent = model_path.parent().unwrap_or_else(|| Path::new("."));
-    let stem = model_path.file_stem()?.to_string_lossy();
-    [parent.join("tokenizer.json"), parent.join(format!("{}.tokenizer.json", stem))].into_iter().find(|p| p.is_file())
-}
-
 fn format_count(n: u64) -> String { if n >= 1_000_000_000 { format!("{:.1}B", n as f64 / 1e9) } else if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else if n >= 1_000 { format!("{:.1}K", n as f64 / 1e3) } else { n.to_string() } }
-fn format_size(bytes: u64) -> String { if bytes >= 1024*1024*1024 { format!("{:.2} GB", bytes as f64 / 1024_f64.powi(3)) } else { format!("{:.0} MB", bytes as f64 / 1024_f64.powi(2)) } }
+fn format_size(bytes: u64) -> String { if bytes >= 1024 * 1024 * 1024 { format!("{:.2} GB", bytes as f64 / 1024_f64.powi(3)) } else { format!("{:.1} MB", bytes as f64 / 1024_f64.powi(2)) } }
 
 fn load_llama(path: &Path, device: &Device) -> Result<(ModelWeights, Tokenizer)> {
     let mut file = File::open(path).with_context(|| format!("cannot open {}", path.display()))?;
@@ -139,7 +133,7 @@ fn select_device() -> Device { Device::new_cuda(0).unwrap_or(Device::Cpu) }
 fn select_device() -> Device { Device::Cpu }
 
 fn make_sampling(temperature: f64, top_p: f64, top_k: usize, seed: u64) -> LogitsProcessor {
-    let sampling = if temperature <= 0.0 { Sampling::ArgMax } else if top_k > 0 { Sampling::TopKThenTopP { k: top_k, p: top_p.clamp(0.05,1.0), temperature } } else if top_p < 1.0 { Sampling::TopP { p: top_p.clamp(0.05,1.0), temperature } } else { Sampling::All { temperature } };
+    let sampling = if temperature <= 0.0 { Sampling::ArgMax } else if top_k > 0 { Sampling::TopKThenTopP { k: top_k, p: top_p.clamp(0.05, 1.0), temperature } } else if top_p < 1.0 { Sampling::TopP { p: top_p.clamp(0.05, 1.0), temperature } } else { Sampling::All { temperature } };
     LogitsProcessor::from_sampling(seed, sampling)
 }
 
@@ -169,7 +163,9 @@ fn generate_inner(app: &AppHandle, cancel: &AtomicBool, cfg: GenerationConfig) -
     let mut generated = Vec::<u32>::new();
     let start = Instant::now();
     let mut position = 0usize;
-    let mut next = { let input = Tensor::new(prompt_tokens.as_slice(), &device)?.unsqueeze(0)?; let logits = model.forward(&input, position)?.squeeze(0)?; sampler.sample(&logits)? };
+    let input = Tensor::new(prompt_tokens.as_slice(), &device)?.unsqueeze(0)?;
+    let logits = model.forward(&input, position)?.squeeze(0)?;
+    let mut next = sampler.sample(&logits)?;
     for _ in 0..max_tokens {
         if cancel.load(Ordering::SeqCst) { break; }
         generated.push(next);
@@ -178,9 +174,8 @@ fn generate_inner(app: &AppHandle, cancel: &AtomicBool, cfg: GenerationConfig) -
         if eos.contains(&next) { break; }
         prompt_tokens.push(next);
         let input = Tensor::new(&[next], &device)?.unsqueeze(0)?;
-        let logits = model.forward(&input, position + 1)?.squeeze(0)?;
-        let start_at = prompt_tokens.len().saturating_sub(64);
-        let logits = if (cfg.repeat_penalty - 1.0).abs() < f32::EPSILON { logits } else { candle_transformers::utils::apply_repeat_penalty(&logits, cfg.repeat_penalty, &prompt_tokens[start_at..])? };
+        let mut logits = model.forward(&input, position + 1)?.squeeze(0)?;
+        if (cfg.repeat_penalty - 1.0).abs() >= f32::EPSILON { let start_at = prompt_tokens.len().saturating_sub(64); logits = candle_transformers::utils::apply_repeat_penalty(&logits, cfg.repeat_penalty, &prompt_tokens[start_at..])?; }
         next = sampler.sample(&logits)?;
         position += 1;
         if prompt_tokens.len() >= context { break; }
@@ -197,6 +192,10 @@ pub fn run() {
         .manage(EngineState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().with_shortcuts(["CommandOrControl+Shift+Space"]).expect("valid shortcut").with_handler(|app, _shortcut, event| {
+            use tauri_plugin_global_shortcut::ShortcutState;
+            if event.state == ShortcutState::Pressed { let _ = app.emit("synth-quick", "open"); }
+        }).build())
         .invoke_handler(tauri::generate_handler![engine_status, system_stats, inspect_model, cancel_generation, start_generation])
         .run(tauri::generate_context!())
         .expect("error while running Synth Studio");
