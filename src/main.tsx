@@ -1,137 +1,256 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { createRoot } from 'react-dom/client';
+import { useEffect, useMemo, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
-import { 
-  Archive, Bot, Check, ChevronDown, CircleHelp, Command, Cpu, Download, FileText, FolderOpen,
-  Gauge, Hash, History, Library, MessageSquarePlus, Moon, MoreHorizontal, Paperclip, PanelLeft,
-  Pin, Plus, Search, Send, Settings, Sparkles, Sun, Trash2, Upload, UserRound, UsersRound, X, Zap
+import { readTextFile } from '@tauri-apps/plugin-fs';
+import {
+  Activity, Archive, ArrowUpRight, Bot, Check, ChevronDown, Clipboard, Command, Cpu, Download,
+  FileCode2, FileText, FolderOpen, Gauge, History, Keyboard, Library, Menu, MessageSquarePlus,
+  Moon, MoreHorizontal, Paperclip, PanelLeft, Pin, Plus, RotateCcw, Search, Send, Settings,
+  Sparkles, Sun, Trash2, Upload, UserRound, UsersRound, X, Zap
 } from 'lucide-react';
 import './styles.css';
 
-type Page = 'Chat' | 'Models' | 'Personas' | 'Settings';
-type Message = { role: 'user' | 'assistant'; content: string; time: string; stats?: string };
-type Chat = { id: number; title: string; pinned: boolean; messages: Message[] };
-type Model = { name: string; size: string; status: 'installed' | 'missing'; quant: string; architecture: string };
+type Page = 'Chat' | 'Models' | 'Personas' | 'Lab' | 'Playground' | 'Knowledge' | 'Settings';
+type Message = { id: string; role: 'user' | 'assistant'; content: string; time: string; stats?: string; files?: AttachedFile[] };
+type Chat = { id: string; title: string; pinned: boolean; messages: Message[] };
+type Model = { id: string; name: string; path: string; size: string; bytes: number; architecture: string; quantization: string; context: number; status: 'ready' | 'unsupported' | 'missing'; parameterCount?: string; tokenizer: 'embedded' | 'sidecar' | 'missing' };
+type Persona = { id: string; name: string; description: string; prompt: string; temperature: number };
+type AttachedFile = { name: string; path: string; size: string; content?: string };
+type GenerationResult = { text: string; tokens: number; seconds: number; tokens_per_sec: number; cancelled: boolean };
+type SystemStats = { cpu_usage: number; memory_used_mb: number; memory_total_mb: number; process_memory_mb: number; gpu_available: boolean; gpu_note: string };
+type KnowledgeDoc = { id: string; name: string; content: string; size: string };
 
-const now = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-const starterChats: Chat[] = [{ id: 1, title: 'Welcome to Synth Studio', pinned: true, messages: [{ role: 'assistant', content: 'Welcome to **Synth Studio**. Your local AI workspace is ready.\n\nImport a GGUF model from **Models** to begin local inference.', time: now() }] }];
-const starterModels: Model[] = [{ name: 'No model imported', size: '—', status: 'missing', quant: '—', architecture: '—' }];
-const personas = ['Balanced', 'Coder', 'Tutor', 'Creative', 'Researcher', 'Companion'];
+const DEFAULT_PERSONAS: Persona[] = [
+  { id: 'balanced', name: 'Balanced', description: 'Clear general-purpose assistant', prompt: 'Be clear, useful, concise, and honest. Explain important reasoning without unnecessary filler.', temperature: 0.7 },
+  { id: 'coder', name: 'Coder', description: 'Programming-focused assistant', prompt: 'Act as a pragmatic senior programmer. Prefer working code, explain bugs clearly, and call out assumptions.', temperature: 0.35 },
+  { id: 'tutor', name: 'Tutor', description: 'Step-by-step explanations', prompt: 'Teach patiently. Start from the user\'s level, use simple examples, then add depth only when useful.', temperature: 0.55 },
+  { id: 'creative', name: 'Creative', description: 'Writing and ideation', prompt: 'Be imaginative, specific, and polished. Avoid generic ideas and explore distinctive possibilities.', temperature: 0.9 },
+  { id: 'researcher', name: 'Researcher', description: 'Evidence-focused analysis', prompt: 'Separate facts, assumptions, and uncertainty. Prefer structured analysis and do not invent sources.', temperature: 0.35 },
+  { id: 'companion', name: 'Companion', description: 'Natural, empathetic conversation', prompt: 'Be warm and emotionally aware while staying grounded and honest. Do not overdo reassurance.', temperature: 0.78 },
+];
+
+const starterChat: Chat = { id: 'welcome', title: 'Welcome to Synth Studio', pinned: true, messages: [{ id: 'w1', role: 'assistant', content: 'Welcome to **Synth Studio**.\n\nYour local workspace is ready. Import a compatible GGUF model from **Models** and start chatting without a cloud account.', time: clock() }] };
+const fmtBytes = (n: number) => n < 1024 ** 2 ? `${Math.max(1, Math.round(n / 1024))} KB` : n < 1024 ** 3 ? `${(n / 1024 ** 2).toFixed(1)} MB` : `${(n / 1024 ** 3).toFixed(2)} GB`;
+const uid = () => `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+const load = <T,>(key: string, fallback: T): T => { try { return JSON.parse(localStorage.getItem(key) || '') as T; } catch { return fallback; } };
+function clock() { return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+function escapeHtml(s: string) { return s.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;'); }
+function renderMarkdown(input: string) {
+  const escaped = escapeHtml(input);
+  return escaped
+    .replace(/```([\s\S]*?)```/g, '<pre><code>$1</code></pre>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+    .replace(/^### (.*)$/gm, '<h4>$1</h4>')
+    .replace(/^## (.*)$/gm, '<h3>$1</h3>')
+    .replace(/^# (.*)$/gm, '<h2>$1</h2>')
+    .replace(/\n/g, '<br/>');
+}
 
 function App() {
   const [page, setPage] = useState<Page>('Chat');
-  const [dark, setDark] = useState(false);
+  const [dark, setDark] = useState(load('synth.theme.dark', false));
   const [collapsed, setCollapsed] = useState(false);
   const [query, setQuery] = useState('');
   const [input, setInput] = useState('');
-  const [selectedModel, setSelectedModel] = useState('No model imported');
-  const [persona, setPersona] = useState('Balanced');
-  const [chats, setChats] = useState(starterChats);
-  const [activeId, setActiveId] = useState(1);
-  const [models, setModels] = useState(starterModels);
-  const [busy, setBusy] = useState(false);
+  const [models, setModels] = useState<Model[]>(load('synth.models', []));
+  const [selectedModel, setSelectedModel] = useState(load<string>('synth.selectedModel', ''));
+  const [personas, setPersonas] = useState<Persona[]>(load('synth.personas', DEFAULT_PERSONAS));
+  const [personaId, setPersonaId] = useState(load('synth.persona', 'balanced'));
+  const [chats, setChats] = useState<Chat[]>(load('synth.chats', [starterChat]));
+  const [activeId, setActiveId] = useState(load('synth.activeChat', 'welcome'));
   const [notice, setNotice] = useState('');
-  const [engine, setEngine] = useState('Native Rust bridge ready');
+  const [stats, setStats] = useState<SystemStats | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [requestId, setRequestId] = useState('');
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [editId, setEditId] = useState<string | null>(null);
+  const [editText, setEditText] = useState('');
+  const [knowledge, setKnowledge] = useState<KnowledgeDoc[]>(load('synth.knowledge', []));
+  const [labPrompt, setLabPrompt] = useState('Explain why local AI can be useful on a low-end laptop.');
+  const [labA, setLabA] = useState('');
+  const [labB, setLabB] = useState('');
+  const [labResults, setLabResults] = useState<{ name: string; result?: GenerationResult; error?: string }[]>([]);
 
   const active = chats.find(c => c.id === activeId) ?? chats[0];
+  const activePersona = personas.find(p => p.id === personaId) ?? personas[0];
+  const currentModel = models.find(m => m.id === selectedModel) ?? models[0];
   const visibleChats = useMemo(() => chats.filter(c => c.title.toLowerCase().includes(query.toLowerCase())), [chats, query]);
 
+  useEffect(() => { localStorage.setItem('synth.theme.dark', JSON.stringify(dark)); }, [dark]);
+  useEffect(() => { localStorage.setItem('synth.models', JSON.stringify(models)); }, [models]);
+  useEffect(() => { localStorage.setItem('synth.selectedModel', JSON.stringify(selectedModel)); }, [selectedModel]);
+  useEffect(() => { localStorage.setItem('synth.personas', JSON.stringify(personas)); }, [personas]);
+  useEffect(() => { localStorage.setItem('synth.persona', JSON.stringify(personaId)); }, [personaId]);
+  useEffect(() => { localStorage.setItem('synth.chats', JSON.stringify(chats)); localStorage.setItem('synth.activeChat', JSON.stringify(activeId)); }, [chats, activeId]);
+  useEffect(() => { localStorage.setItem('synth.knowledge', JSON.stringify(knowledge)); }, [knowledge]);
+
   useEffect(() => {
-    invoke<string>('engine_status').then(setEngine).catch(() => setEngine('Rust engine unavailable'));
+    const refresh = async () => { try { setStats(await invoke<SystemStats>('system_stats')); } catch { /* web preview */ } };
+    refresh(); const t = window.setInterval(refresh, 4000); return () => window.clearInterval(t);
   }, []);
 
-  const toast = (text: string) => { setNotice(text); window.setTimeout(() => setNotice(''), 2400); };
-  const newChat = () => { const id = Date.now(); setChats(c => [{ id, title: 'New conversation', pinned: false, messages: [] }, ...c]); setActiveId(id); setPage('Chat'); };
-  const deleteChat = (id: number) => { setChats(c => c.filter(x => x.id !== id)); if (activeId === id) setActiveId(chats.find(x => x.id !== id)?.id ?? 0); };
-  const togglePin = (id: number) => setChats(c => c.map(x => x.id === id ? { ...x, pinned: !x.pinned } : x));
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const meta = e.ctrlKey || e.metaKey;
+      if (meta && e.key === 'Enter') { e.preventDefault(); void send(); }
+      if (meta && e.key.toLowerCase() === 'k') { e.preventDefault(); setQuery(''); setQuickOpen(true); }
+      if (meta && e.code === 'Space') { e.preventDefault(); setQuickOpen(v => !v); }
+      if (e.key === 'Escape') setQuickOpen(false);
+    };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  });
 
-  const send = async () => {
-    const text = input.trim();
-    if (!text || busy) return;
-    const stamp = now();
-    setInput(''); setBusy(true);
-    setChats(c => c.map(x => x.id === activeId ? { ...x, title: x.messages.length ? x.title : text.slice(0, 34), messages: [...x.messages, { role: 'user', content: text, time: stamp }] } : x));
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    listen<{ request_id: string; text: string }>('generation-token', ev => {
+      if (ev.payload.request_id !== requestId) return;
+      updateActiveAssistant(ev.payload.text);
+    }).then(fn => { unlisten = fn; });
+    return () => { unlisten?.(); };
+  }, [requestId, activeId]);
+
+  const toast = (s: string) => { setNotice(s); window.setTimeout(() => setNotice(''), 2600); };
+  const patchChat = (fn: (c: Chat) => Chat) => setChats(cs => cs.map(c => c.id === activeId ? fn(c) : c));
+  const updateActiveAssistant = (text: string) => patchChat(c => { const i = c.messages.findIndex(m => m.id === requestId); if (i < 0) return c; const messages = [...c.messages]; messages[i] = { ...messages[i], content: text }; return { ...c, messages }; });
+
+  function newChat() { const id = uid(); setChats(c => [{ id, title: 'New conversation', pinned: false, messages: [] }, ...c]); setActiveId(id); setPage('Chat'); }
+  function deleteChat(id: string) { setChats(c => c.filter(x => x.id !== id)); if (activeId === id) setActiveId(chats.find(x => x.id !== id)?.id ?? 'welcome'); }
+  function togglePin(id: string) { setChats(c => c.map(x => x.id === id ? { ...x, pinned: !x.pinned } : x)); }
+  function copyText(text: string) { navigator.clipboard?.writeText(text); toast('Copied'); }
+
+  async function attachFile() {
     try {
-      const response = await invoke<string>('local_inference', { prompt: text, model: selectedModel });
-      setChats(c => c.map(x => x.id === activeId ? { ...x, messages: [...x.messages, { role: 'assistant', content: response, time: now(), stats: 'Local engine' }] } : x));
-    } catch (e) {
-      setChats(c => c.map(x => x.id === activeId ? { ...x, messages: [...x.messages, { role: 'assistant', content: `**Local inference is not configured yet.**\n\n${String(e)}\n\nImport a GGUF model in Models to continue.`, time: now() }] } : x));
-    } finally { setBusy(false); }
-  };
+      const selected = await open({ multiple: false, filters: [{ name: 'Text and code', extensions: ['txt','md','json','py','js','ts','tsx','jsx','html','css','rs','toml','yaml','yml'] }] });
+      if (!selected || Array.isArray(selected)) return;
+      const path = String(selected); const name = path.split(/[\\/]/).pop() || 'file';
+      let content = ''; try { content = await readTextFile(path); } catch { /* metadata-only */ }
+      const file: AttachedFile = { name, path, size: content ? fmtBytes(new Blob([content]).size) : 'Local file', content };
+      patchChat(c => ({ ...c, messages: [...c.messages, { id: uid(), role: 'user', content: `Attached **${name}**.`, time: clock(), files: [file] }] }));
+      toast(content ? `${name} attached locally` : `${name} attached`);
+    } catch (e) { toast(`Attachment failed: ${String(e)}`); }
+  }
 
-  const importModel = async () => {
+  async function send(textOverride?: string) {
+    const text = (textOverride ?? input).trim();
+    if (!text || busy) return;
+    if (!currentModel || currentModel.status !== 'ready') { toast('Import a supported GGUF model first'); setPage('Models'); return; }
+    const rid = uid(); setRequestId(rid); setInput(''); setBusy(true);
+    const previous = active?.messages ?? [];
+    const title = previous.length ? active.title : text.slice(0, 42);
+    const history = previous.slice(-10).map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join('\n\n');
+    const prompt = `${activePersona.prompt}\n\n${history ? history + '\n\n' : ''}User: ${text}\nAssistant:`;
+    patchChat(c => ({ ...c, title, messages: [...c.messages, { id: uid(), role: 'user', content: text, time: clock() }, { id: rid, role: 'assistant', content: '', time: clock() }] }));
+    try {
+      const r = await invoke<GenerationResult>('start_generation', {
+        requestId: rid, modelPath: currentModel.path, prompt, maxTokens: 512, temperature: activePersona.temperature, topP: 0.9, topK: 40, repeatPenalty: 1.1, contextLength: Math.min(currentModel.context || 4096, 8192), seed: 42,
+      });
+      patchChat(c => { const messages = c.messages.map(m => m.id === rid ? { ...m, content: r.text, stats: `${r.tokens} tokens · ${r.tokens_per_sec.toFixed(1)} tok/s · ${r.seconds.toFixed(1)}s` } : m); return { ...c, messages }; });
+      if (r.cancelled) toast('Generation stopped');
+    } catch (e) {
+      patchChat(c => ({ ...c, messages: c.messages.map(m => m.id === rid ? { ...m, content: `**Synth could not generate a response.**\n\n${String(e)}`, stats: 'Generation error' } : m) }));
+    } finally { setBusy(false); }
+  }
+
+  async function stop() { try { await invoke('cancel_generation'); } catch { /* ignore */ } }
+
+  async function importModel() {
     try {
       const selected = await open({ multiple: false, filters: [{ name: 'GGUF model', extensions: ['gguf'] }] });
       if (!selected || Array.isArray(selected)) return;
       const path = String(selected);
-      const name = path.split(/[\\/]/).pop() || 'Imported GGUF';
-      const result = await invoke<Model>('register_model', { path });
-      setModels([result, ...models.filter(m => m.name !== 'No model imported')]); setSelectedModel(result.name); toast(`${name} imported`);
+      const model = await invoke<Model>('inspect_model', { path });
+      setModels(ms => [model, ...ms.filter(m => m.path !== model.path)]);
+      if (model.status === 'ready') setSelectedModel(model.id); else toast(model.status === 'unsupported' ? `Unsupported architecture: ${model.architecture}` : 'Model validation failed');
+      toast(model.status === 'ready' ? `${model.name} is ready` : `${model.name} imported with limitations`);
     } catch (e) { toast(`Model import failed: ${String(e)}`); }
-  };
+  }
+  async function inspectSelected(m: Model) { try { const refreshed = await invoke<Model>('inspect_model', { path: m.path }); setModels(ms => ms.map(x => x.id === m.id ? refreshed : x)); toast('Model metadata refreshed'); } catch (e) { toast(String(e)); } }
+
+  async function exportChat() {
+    if (!active) return;
+    const body = `# ${active.title}\n\n` + active.messages.map(m => `**${m.role === 'user' ? 'You' : 'Synth'}** · ${m.time}\n\n${m.content}`).join('\n\n---\n\n');
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([body], { type: 'text/markdown' })); a.download = `${active.title.replace(/[^a-z0-9]+/gi, '-').toLowerCase() || 'synth-chat'}.md`; a.click(); URL.revokeObjectURL(a.href); toast('Chat exported');
+  }
+
+  async function addKnowledge() {
+    try {
+      const selected = await open({ multiple: true, filters: [{ name: 'Knowledge files', extensions: ['txt','md','json','py','js','ts','html','css','rs'] }] });
+      const paths = Array.isArray(selected) ? selected : selected ? [selected] : [];
+      for (const p of paths) { const path = String(p); let content = ''; try { content = await readTextFile(path); } catch {} if (!content) continue; const name = path.split(/[\\/]/).pop() || 'Document'; setKnowledge(k => [...k, { id: uid(), name, content, size: fmtBytes(new Blob([content]).size) }]); }
+      if (paths.length) toast('Knowledge added locally');
+    } catch (e) { toast(`Knowledge import failed: ${String(e)}`); }
+  }
+
+  async function runLab() {
+    if (!labA || !labB || !labPrompt.trim()) { toast('Choose two models and a prompt'); return; }
+    setLabResults([]); const picks = [labA, labB].filter((id, i, a) => a.indexOf(id) === i).map(id => models.find(m => m.id === id)).filter((m): m is Model => Boolean(m));
+    for (const m of picks) {
+      try {
+        const r = await invoke<GenerationResult>('start_generation', { requestId: uid(), modelPath: m.path, prompt: labPrompt, maxTokens: 256, temperature: 0.4, topP: 0.9, topK: 40, repeatPenalty: 1.1, contextLength: Math.min(m.context || 4096, 4096), seed: 42 });
+        setLabResults(x => [...x, { name: m.name, result: r }]);
+      } catch (e) { setLabResults(x => [...x, { name: m.name, error: String(e) }]); }
+    }
+  }
 
   return <div className={dark ? 'app dark' : 'app'}>
-    <aside className={collapsed ? 'sidebar collapsed' : 'sidebar'}>
-      <div className="brand"><div className="synth-mark"><Sparkles size={17}/></div>{!collapsed && <><div><strong>Synth Studio</strong><span>by Fulltrack</span></div><button className="icon-btn tiny" onClick={() => setCollapsed(true)} title="Collapse sidebar"><PanelLeft size={16}/></button></>}</div>
+    <aside className={`sidebar ${collapsed ? 'collapsed' : ''}`}>
+      <div className="brand"><div className="brand-mark"><span/><span/><span/><span/><span/></div>{!collapsed && <div className="brand-copy"><strong>Synth Studio</strong><small>by Fulltrack</small></div>}{!collapsed && <button className="icon-btn tiny" onClick={() => setCollapsed(true)} title="Collapse sidebar"><PanelLeft size={16}/></button>}</div>
       {collapsed && <button className="icon-btn expand" onClick={() => setCollapsed(false)} title="Expand sidebar"><PanelLeft size={17}/></button>}
-      <button className="new-chat" onClick={newChat}><Plus size={17}/>{!collapsed && 'New chat'}{!collapsed && <kbd>⌘N</kbd>}</button>
-      {!collapsed && <div className="search"><Search size={15}/><input placeholder="Search chats" value={query} onChange={e => setQuery(e.target.value)}/><kbd>⌘K</kbd></div>}
-      <div className="nav-label">{!collapsed && 'Workspace'}</div>
-      <Nav icon={<MessageSquarePlus/>} label="Chat" active={page === 'Chat'} collapsed={collapsed} onClick={() => setPage('Chat')}/>
-      <Nav icon={<Library/>} label="Models" active={page === 'Models'} collapsed={collapsed} onClick={() => setPage('Models')}/>
-      <Nav icon={<UsersRound/>} label="Personas" active={page === 'Personas'} collapsed={collapsed} onClick={() => setPage('Personas')}/>
-      <div className="nav-label spacer">{!collapsed && 'System'}</div>
-      <Nav icon={<Settings/>} label="Settings" active={page === 'Settings'} collapsed={collapsed} onClick={() => setPage('Settings')}/>
-      <div className="sidebar-bottom">
-        <div className="engine"><span className="status-dot"/><span>{collapsed ? '' : engine}</span></div>
-        {!collapsed && <div className="privacy"><span><Check size={13}/> Local-first</span><span>No account</span></div>}
-      </div>
+      <button className="new-chat" onClick={newChat}><Plus size={16}/>{!collapsed && <><span>New chat</span><kbd>Ctrl N</kbd></>}</button>
+      {!collapsed && <div className="search"><Search size={14}/><input placeholder="Search chats" value={query} onChange={e => setQuery(e.target.value)}/><kbd>Ctrl K</kbd></div>}
+      <div className="section-label">{!collapsed && 'Workspace'}</div>
+      <Nav icon={<MessageSquarePlus/>} text="Chat" active={page === 'Chat'} collapsed={collapsed} onClick={() => setPage('Chat')}/>
+      <Nav icon={<Library/>} text="Models" active={page === 'Models'} collapsed={collapsed} onClick={() => setPage('Models')}/>
+      <Nav icon={<UsersRound/>} text="Personas" active={page === 'Personas'} collapsed={collapsed} onClick={() => setPage('Personas')}/>
+      <Nav icon={<Activity/>} text="Synth Lab" active={page === 'Lab'} collapsed={collapsed} onClick={() => setPage('Lab')}/>
+      <Nav icon={<Command/>} text="Playground" active={page === 'Playground'} collapsed={collapsed} onClick={() => setPage('Playground')}/>
+      <Nav icon={<Archive/>} text="Knowledge" active={page === 'Knowledge'} collapsed={collapsed} onClick={() => setPage('Knowledge')}/>
+      <div className="section-label system">{!collapsed && 'System'}</div>
+      <Nav icon={<Settings/>} text="Settings" active={page === 'Settings'} collapsed={collapsed} onClick={() => setPage('Settings')}/>
+      {!collapsed && <div className="recent"><div className="section-label">Recent</div>{visibleChats.slice(0,5).map(c => <button key={c.id} className={`chat-row ${c.id===activeId?'active':''}`} onClick={() => { setActiveId(c.id); setPage('Chat'); }}><History size={13}/><span>{c.title}</span>{c.pinned&&<Pin size={11}/>}</button>)}</div>}
+      <div className="sidebar-bottom"><div className="engine"><span className="online"/><span>{collapsed ? '' : currentModel?.name || 'No model loaded'}</span></div>{!collapsed && <div className="privacy"><span><Check size={12}/> On-device</span><span>{stats ? `${Math.round(stats.process_memory_mb)} MB app` : 'Local-first'}</span></div>}</div>
     </aside>
 
     <main className="main">
-      <header className="topbar">
-        <div className="crumb"><span>{page}</span>{page === 'Chat' && <><span className="slash">/</span><span className="muted">{active?.title ?? 'New conversation'}</span></>}</div>
-        <div className="top-actions">
-          <button className="model-select" onClick={() => setPage('Models')}><Bot size={16}/><span>{selectedModel}</span><ChevronDown size={14}/></button>
-          <button className="icon-btn" onClick={() => setDark(!dark)} title="Toggle appearance">{dark ? <Sun size={17}/> : <Moon size={17}/>}</button>
-          <button className="icon-btn" onClick={() => toast('Command palette: coming next')} title="Command palette"><Command size={17}/></button>
-        </div>
-      </header>
+      <header className="topbar"><div className="crumb"><strong>{page === 'Lab' ? 'Synth Lab' : page}</strong>{page === 'Chat' && <><span>/</span><span className="muted">{active?.title || 'New conversation'}</span></>}</div><div className="top-actions"><button className="model-pill" onClick={() => setPage('Models')}><Bot size={15}/><span>{currentModel?.name || 'No model'}</span><ChevronDown size={13}/></button><button className="icon-btn" onClick={() => setDark(v => !v)} title="Toggle appearance">{dark ? <Sun size={16}/> : <Moon size={16}/>}</button><button className="icon-btn" onClick={() => setQuickOpen(true)} title="Command palette"><Command size={16}/></button></div></header>
 
-      {page === 'Chat' && <>
-        <section className="chat-wrap">
-          <div className="chat-scroll">
-            {active?.messages.length === 0 && <Welcome onNew={newChat}/>} 
-            {active?.messages.map((m, i) => <MessageView key={i} message={m} onCopy={() => navigator.clipboard?.writeText(m.content).then(() => toast('Copied'))}/>) }
-            {busy && <div className="message assistant"><div className="avatar"><Sparkles size={15}/></div><div className="bubble"><span className="typing"><i/><i/><i/></span></div></div>}
-          </div>
-          <div className="composer-area">
-            <div className="composer">
-              <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } }} placeholder={selectedModel === 'No model imported' ? 'Import a model to chat locally…' : 'Message Synth…'} rows={1}/>
-              <div className="composer-bar"><button className="composer-icon" title="Attach file" onClick={() => toast('File attachment is wired for the next integration step')}><Paperclip size={17}/></button><span className="composer-hint">Shift + Enter for a new line</span><button className="send" onClick={send} disabled={!input.trim() || busy}><Send size={16}/></button></div>
-            </div>
-            <p className="disclaimer">Synth Studio runs inference locally when a compatible model is installed. Your chats stay on this device.</p>
-          </div>
-        </section>
-      </>}
-
-      {page === 'Models' && <Models models={models} onImport={importModel} onRemove={name => { setModels(m => m.filter(x => x.name !== name)); if (selectedModel === name) setSelectedModel('No model imported'); toast('Model removed'); }}/>} 
-      {page === 'Personas' && <Personas active={persona} setActive={setPersona} toast={toast}/>} 
-      {page === 'Settings' && <SettingsPage dark={dark} setDark={setDark} toast={toast}/>} 
+      {page === 'Chat' && <ChatPage active={active} input={input} setInput={setInput} busy={busy} currentModel={currentModel} onSend={() => void send()} onStop={() => void stop()} onAttach={() => void attachFile()} onCopy={copyText} onExport={() => void exportChat()} onNew={newChat} onDelete={deleteChat} onPin={togglePin} onEdit={(m) => { setEditId(m.id); setEditText(m.content); }} editId={editId} editText={editText} setEditText={setEditText} onSaveEdit={(id) => { patchChat(c => ({ ...c, messages: c.messages.map(m => m.id === id ? { ...m, content: editText } : m) })); setEditId(null); toast('Message updated'); }} onCancelEdit={() => setEditId(null)} />}
+      {page === 'Models' && <ModelsPage models={models} selected={selectedModel} onSelect={setSelectedModel} onImport={importModel} onRemove={(id) => { setModels(ms => ms.filter(m=>m.id!==id)); if(selectedModel===id) setSelectedModel(''); }} onInspect={inspectSelected} />}
+      {page === 'Personas' && <PersonasPage personas={personas} active={personaId} setActive={setPersonaId} setPersonas={setPersonas} toast={toast}/>} 
+      {page === 'Lab' && <LabPage models={models.filter(m=>m.status==='ready')} a={labA} b={labB} setA={setLabA} setB={setLabB} prompt={labPrompt} setPrompt={setLabPrompt} results={labResults} run={runLab}/>} 
+      {page === 'Playground' && <PlaygroundPage persona={activePersona} model={currentModel} toast={toast}/>} 
+      {page === 'Knowledge' && <KnowledgePage docs={knowledge} add={addKnowledge} remove={id=>setKnowledge(k=>k.filter(d=>d.id!==id))} toast={toast}/>} 
+      {page === 'Settings' && <SettingsPage dark={dark} setDark={setDark} stats={stats} models={models} selected={selectedModel} setSelected={setSelectedModel} toast={toast}/>} 
     </main>
-    {notice && <div className="toast"><Check size={15}/>{notice}</div>}
+    {quickOpen && <CommandPalette close={() => setQuickOpen(false)} go={(p) => { setPage(p); setQuickOpen(false); }} newChat={() => { newChat(); setQuickOpen(false); }} />}
+    {notice && <div className="toast"><Check size={14}/>{notice}</div>}
   </div>;
 }
 
-function Nav({icon,label,active,collapsed,onClick}:{icon:React.ReactNode;label:string;active:boolean;collapsed:boolean;onClick:()=>void}) { return <button className={active ? 'nav active' : 'nav'} onClick={onClick} title={collapsed ? label : undefined}>{React.cloneElement(icon as React.ReactElement, {size:17})}<span>{!collapsed && label}</span></button>; }
-function Welcome({onNew}:{onNew:()=>void}) { return <div className="welcome"><div className="hero-mark"><Sparkles size={25}/></div><h1>What can Synth do for you?</h1><p>A clean, private workspace for local intelligence.</p><div className="quick-grid"><button onClick={onNew}><FileText size={17}/><span>Analyze a file<small>Understand local documents</small></span></button><button onClick={onNew}><Zap size={17}/><span>Brainstorm<small>Explore an idea</small></span></button><button onClick={onNew}><Hash size={17}/><span>Write code<small>Build and debug</small></span></button><button onClick={onNew}><CircleHelp size={17}/><span>Learn something<small>Get a clear explanation</small></span></button></div></div>; }
-function MessageView({message,onCopy}:{message:Message;onCopy:()=>void}) { return <div className={`message ${message.role}`}><div className="avatar">{message.role === 'assistant' ? <Sparkles size={15}/> : <UserRound size={15}/>}</div><div className="message-body"><div className="message-meta"><strong>{message.role === 'assistant' ? 'Synth' : 'You'}</strong><span>{message.time}</span></div><div className="bubble" dangerouslySetInnerHTML={{__html:renderMarkdown(message.content)}}/><div className="message-tools"><button onClick={onCopy}><Archive size={13}/> Copy</button>{message.role === 'assistant' && message.stats && <span>{message.stats}</span>}</div></div></div>; }
-function renderMarkdown(text:string) { return text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\*\*(.*?)\*\*/g,'<strong>$1</strong>').replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\n/g,'<br/>'); }
-function Models({models,onImport,onRemove}:{models:Model[];onImport:()=>void;onRemove:(name:string)=>void}) { return <div className="page"><div className="page-head"><div><p className="eyebrow">LOCAL LIBRARY</p><h1>Models</h1><p>Manage the models Synth can run on this machine.</p></div><button className="primary" onClick={onImport}><Upload size={16}/> Import GGUF</button></div><div className="model-grid">{models.map(m => <div className="model-card" key={m.name}><div className="card-icon"><Bot size={19}/></div><div className="card-title"><div><h3>{m.name}</h3><span className={m.status === 'installed' ? 'installed' : 'missing'}>{m.status === 'installed' ? '● Installed' : '○ Not installed'}</span></div><button className="icon-btn" title="Model actions"><MoreHorizontal size={17}/></button></div><div className="model-meta"><span>{m.size}</span><span>{m.quant}</span><span>{m.architecture}</span></div>{m.status === 'installed' ? <div className="card-actions"><button className="secondary"><Check size={14}/> Ready</button><button className="danger" onClick={() => onRemove(m.name)}><Trash2 size={14}/> Remove</button></div> : <div className="empty-model">Import a local <strong>.gguf</strong> file to use this model.</div>}</div>)}</div></div>; }
-function Personas({active,setActive,toast}:{active:string;setActive:(x:string)=>void;toast:(x:string)=>void}) { return <div className="page"><div className="page-head"><div><p className="eyebrow">BEHAVIOR</p><h1>Personas</h1><p>Give your local model a consistent way of working.</p></div><button className="primary" onClick={() => toast('Custom persona editor coming next')}><Plus size={16}/> Create persona</button></div><div className="persona-grid">{personas.map((p,i)=><button key={p} className={active===p ? 'persona active' : 'persona'} onClick={()=>{setActive(p);toast(`${p} selected`)}}><div className="persona-icon"><Sparkles size={17}/></div><div><strong>{p}</strong><p>{['General purpose assistant','Programming focused','Step-by-step explanations','Writing and ideation','Evidence-focused analysis','Natural conversation'][i]}</p></div>{active===p&&<Check size={16}/>}</button>)}</div><div className="editor-card"><div><p className="eyebrow">ACTIVE PERSONA</p><h2>{active}</h2><p>Temperature presets and system instructions will be editable here. Your selection is stored locally.</p></div><button className="secondary" onClick={()=>toast('Persona editor coming next')}><Settings size={14}/> Configure</button></div></div>; }
-function SettingsPage({dark,setDark,toast}:{dark:boolean;setDark:(x:boolean)=>void;toast:(x:string)=>void}) { return <div className="page settings-page"><div className="page-head"><div><p className="eyebrow">SYSTEM</p><h1>Settings</h1><p>Control how Synth Studio behaves on this device.</p></div></div><SettingGroup title="Appearance"><SettingRow icon={dark?<Moon/>:<Sun/>} title="Theme" desc="Choose the visual appearance of Synth Studio."><button className="segmented" onClick={()=>setDark(false)}><span className={!dark?'selected':''}>Light</span><span onClick={(e)=>{e.stopPropagation();setDark(true)}} className={dark?'selected':''}>Dark</span></button></SettingRow><SettingRow icon={<Gauge/>} title="Interface scale" desc="Adjust the density of the workspace."><span className="value">100%</span></SettingRow></SettingGroup><SettingGroup title="Local AI"><SettingRow icon={<Library/>} title="Model directory" desc="Where imported local models are stored or discovered."><button className="secondary" onClick={()=>toast('Directory picker coming with model storage integration')}><FolderOpen size={14}/> Choose</button></SettingRow><SettingRow icon={<Cpu/>} title="Runtime" desc="Native Rust bridge with local inference adapter."><span className="badge">Local</span></SettingRow></SettingGroup><SettingGroup title="Privacy & data"><SettingRow icon={<Archive/>} title="Local-first storage" desc="Conversations and settings remain on this device."><span className="badge"><Check size={12}/> Enabled</span></SettingRow><SettingRow icon={<Trash2/>} title="Clear conversations" desc="Permanently remove local conversation history."><button className="danger" onClick={()=>toast('Conversation clearing requires confirmation')}>Clear</button></SettingRow></SettingGroup></div>; }
-function SettingGroup({title,children}:{title:string;children:React.ReactNode}) { return <section className="setting-group"><h2>{title}</h2>{children}</section>; }
-function SettingRow({icon,title,desc,children}:{icon:React.ReactNode;title:string;desc:string;children:React.ReactNode}) { return <div className="setting-row"><div className="setting-icon">{React.cloneElement(icon as React.ReactElement,{size:17})}</div><div className="setting-copy"><strong>{title}</strong><span>{desc}</span></div><div>{children}</div></div>; }
+function Nav({icon,text,active,collapsed,onClick}:{icon:React.ReactNode;text:string;active:boolean;collapsed:boolean;onClick:()=>void}) { return <button className={`nav ${active?'active':''}`} onClick={onClick} title={collapsed?text:undefined}>{Object.assign(icon as React.ReactElement, {})}{!collapsed&&<span>{text}</span>}</button>; }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App/></React.StrictMode>);
+function ChatPage(p:{active?:Chat;input:string;setInput:(s:string)=>void;busy:boolean;currentModel?:Model;onSend:()=>void;onStop:()=>void;onAttach:()=>void;onCopy:(s:string)=>void;onExport:()=>void;onNew:()=>void;onDelete:(id:string)=>void;onPin:(id:string)=>void;onEdit:(m:Message)=>void;editId:string|null;editText:string;setEditText:(s:string)=>void;onSaveEdit:(id:string)=>void;onCancelEdit:()=>void}) {
+  return <section className="chat-page"><div className="chat-scroll">{p.active?.messages.length===0 ? <div className="welcome"><div className="big-mark"><span/><span/><span/><span/><span/></div><h1>What are you working on?</h1><p>Local intelligence, with a calm desktop workspace.</p><div className="suggestions"><button onClick={()=>p.setInput('Help me plan a Python project')}><FileCode2 size={17}/><span>Build something<small>Start a project from scratch</small></span></button><button onClick={()=>p.setInput('Explain this concept simply')}><Sparkles size={17}/><span>Learn<small>Get a step-by-step explanation</small></span></button><button onClick={p.onAttach}><Paperclip size={17}/><span>Analyze a file<small>Bring local text or code</small></span></button></div></div> : p.active?.messages.map(m => <MessageItem key={m.id} message={m} busy={p.busy&&m.content===''} onCopy={()=>p.onCopy(m.content)} onEdit={()=>p.onEdit(m)} editing={p.editId===m.id} editText={p.editText} setEditText={p.setEditText} save={()=>p.onSaveEdit(m.id)} cancel={p.onCancelEdit}/>)}</div><div className="composer-area"><div className="composer"><textarea value={p.input} disabled={p.busy} onChange={e=>p.setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();p.onSend();}}} placeholder={p.currentModel?'Message Synth…':'Import a model to start…'} rows={1}/><div className="composer-bar"><button className="ghost-btn" onClick={p.onAttach} title="Attach a local file"><Paperclip size={16}/></button><span className="composer-meta">{p.currentModel ? p.currentModel.name : 'No model loaded'} · local</span>{p.busy?<button className="stop-btn" onClick={p.onStop}><span/> Stop</button>:<button className="send-btn" disabled={!p.input.trim()||!p.currentModel} onClick={p.onSend}><Send size={15}/></button>}</div></div><div className="composer-bottom"><span>Your chats stay on this device.</span><button onClick={p.onNew}>New chat</button><button onClick={p.onExport}>Export</button></div></div></section>;
+}
+function MessageItem({message,busy,onCopy,onEdit,editing,editText,setEditText,save,cancel}:{message:Message;busy:boolean;onCopy:()=>void;onEdit:()=>void;editing:boolean;editText:string;setEditText:(s:string)=>void;save:()=>void;cancel:()=>void}) { return <div className={`message ${message.role}`}><div className="avatar">{message.role==='assistant'?<Sparkles size={14}/>:<UserRound size={14}/>}</div><div className="message-content"><div className="message-head"><strong>{message.role==='assistant'?'Synth':'You'}</strong><span>{message.time}</span></div>{editing?<div className="edit-box"><textarea value={editText} onChange={e=>setEditText(e.target.value)}/><div><button onClick={cancel}>Cancel</button><button className="primary-mini" onClick={save}>Save</button></div></div>:<div className="bubble">{busy?<div className="dots"><i/><i/><i/></div>:<div dangerouslySetInnerHTML={{__html:renderMarkdown(message.content)}}/>}{message.files?.map(f=><div className="file-chip" key={f.path}><FileText size={13}/><span>{f.name}</span><small>{f.size}</small></div>)}</div>} {!editing&&<div className="message-actions"><button onClick={onCopy}><Clipboard size={12}/> Copy</button>{message.role==='user'&&<button onClick={onEdit}>Edit</button>}{message.stats&&<span>{message.stats}</span>}</div>}</div></div>; }
+
+function ModelsPage({models,selected,onSelect,onImport,onRemove,onInspect}:{models:Model[];selected:string;onSelect:(s:string)=>void;onImport:()=>void;onRemove:(s:string)=>void;onInspect:(m:Model)=>void}) { return <div className="page"><div className="page-title"><div><span className="eyebrow">LOCAL LIBRARY</span><h1>Models</h1><p>GGUF stays on your disk. Candle handles inference in Rust.</p></div><button className="primary" onClick={onImport}><Upload size={15}/> Import GGUF</button></div>{models.length===0&&<EmptyCard title="No models yet" text="Import a GGUF file to make Synth local and fully offline." action={onImport}/>}<div className="card-grid">{models.map(m=><div className={`model-card ${selected===m.id?'selected':''}`} key={m.id} onClick={()=>m.status==='ready'&&onSelect(m.id)}><div className="card-top"><div className="round-icon"><Bot size={18}/></div><div className="model-status">{m.status==='ready'?<><span className="dot green"/> Ready</>:m.status==='unsupported'?<><span className="dot amber"/> Unsupported</>:<><span className="dot"/> Missing</>}</div><button className="icon-btn" onClick={e=>{e.stopPropagation();void onInspect(m)}} title="Refresh metadata"><MoreHorizontal size={16}/></button></div><h3>{m.name}</h3><p className="model-path">{m.path}</p><div className="tags"><span>{m.size}</span><span>{m.quantization}</span><span>{m.architecture}</span>{m.parameterCount&&<span>{m.parameterCount}</span>}</div><div className="model-details"><span>Context {m.context||'—'}</span><span>Tokenizer {m.tokenizer}</span></div><div className="card-footer">{m.status==='ready'?<button className="secondary-mini" onClick={e=>{e.stopPropagation();onSelect(m.id)}}>{selected===m.id?<Check size={13}/>:<Zap size={13}/>} {selected===m.id?'Active':'Use model'}</button>:<span className="unsupported-copy">{m.architecture==='llama'?'':`Candle build currently targets Llama GGUF.`}</span>}<button className="danger-mini" onClick={e=>{e.stopPropagation();onRemove(m.id)}}><Trash2 size={13}/> Remove</button></div></div>)}</div></div> }
+
+function PersonasPage({personas,active,setActive,setPersonas,toast}:{personas:Persona[];active:string;setActive:(s:string)=>void;setPersonas:(p:Persona[])=>void;toast:(s:string)=>void}) { const [editing,setEditing]=useState<Persona|null>(null); return <div className="page"><div className="page-title"><div><span className="eyebrow">BEHAVIOR</span><h1>Personas</h1><p>Consistent system instructions stored locally.</p></div><button className="primary" onClick={()=>setEditing({id:uid(),name:'Custom persona',description:'Your own behavior profile',prompt:'',temperature:0.7})}><Plus size={15}/> Create persona</button></div><div className="card-grid persona-grid">{personas.map(p=><button className={`persona-card ${active===p.id?'selected':''}`} key={p.id} onClick={()=>{setActive(p.id);toast(`${p.name} selected`)}}><div className="round-icon"><Sparkles size={17}/></div><div className="persona-copy"><h3>{p.name}</h3><p>{p.description}</p></div>{active===p.id&&<Check size={16}/>}<span className="persona-temp">{p.temperature.toFixed(2)}</span></button>)}</div>{editing&&<div className="modal-scrim"><div className="modal"><div className="modal-head"><div><span className="eyebrow">PERSONA EDITOR</span><h2>{editing.name}</h2></div><button className="icon-btn" onClick={()=>setEditing(null)}><X size={16}/></button></div><label>Name<input value={editing.name} onChange={e=>setEditing({...editing,name:e.target.value})}/></label><label>Description<input value={editing.description} onChange={e=>setEditing({...editing,description:e.target.value})}/></label><label>System instructions<textarea value={editing.prompt} onChange={e=>setEditing({...editing,prompt:e.target.value})}/></label><label>Temperature<input type="range" min="0" max="1.2" step="0.01" value={editing.temperature} onChange={e=>setEditing({...editing,temperature:Number(e.target.value)})}/><span className="range-value">{editing.temperature.toFixed(2)}</span></label><div className="modal-actions"><button className="secondary" onClick={()=>setEditing(null)}>Cancel</button><button className="primary" onClick={()=>{setPersonas([...personas,editing]);setActive(editing.id);setEditing(null);toast('Persona created')}}>Save persona</button></div></div></div>}</div> }
+
+function LabPage({models,a,b,setA,setB,prompt,setPrompt,results,run}:{models:Model[];a:string;b:string;setA:(s:string)=>void;setB:(s:string)=>void;prompt:string;setPrompt:(s:string)=>void;results:{name:string;result?:GenerationResult;error?:string}[];run:()=>void}) { return <div className="page"><div className="page-title"><div><span className="eyebrow">EXPERIMENTS</span><h1>Synth Lab</h1><p>Run the same prompt through two local models and compare them.</p></div><button className="primary" onClick={run}><Activity size={15}/> Run comparison</button></div><div className="lab-controls"><label>Model A<select value={a} onChange={e=>setA(e.target.value)}><option value="">Choose…</option>{models.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label><label>Model B<select value={b} onChange={e=>setB(e.target.value)}><option value="">Choose…</option>{models.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label><label className="lab-prompt">Prompt<textarea value={prompt} onChange={e=>setPrompt(e.target.value)}/></label></div><div className="lab-grid">{results.length?results.map(r=><div className="result-card" key={r.name}><div className="result-head"><strong>{r.name}</strong>{r.result&&<span>{r.result.tokens_per_sec.toFixed(1)} tok/s</span>}</div><div className="result-body">{r.error?<p className="error-copy">{r.error}</p>:<div dangerouslySetInnerHTML={{__html:renderMarkdown(r.result?.text||'')}}/>}</div>{r.result&&<div className="result-foot">{r.result.tokens} tokens · {r.result.seconds.toFixed(2)}s</div>}</div>):<EmptyCard title="No experiment yet" text="Choose two installed models, write a prompt, and run the comparison." action={run}/>}</div></div> }
+
+function PlaygroundPage({persona,model,toast}:{persona:Persona;model?:Model;toast:(s:string)=>void}) { const [temperature,setTemperature]=useState(persona.temperature); const [topP,setTopP]=useState(0.9); const [topK,setTopK]=useState(40); const [maxTokens,setMaxTokens]=useState(512); const [prompt,setPrompt]=useState(''); return <div className="page"><div className="page-title"><div><span className="eyebrow">PROMPT WORKBENCH</span><h1>Playground</h1><p>Experiment with generation parameters without changing chat defaults.</p></div><span className="status-badge">{model?.name||'No model'}</span></div><div className="playground"><div className="parameter-card"><h3>Parameters</h3><Range label="Temperature" value={temperature} min={0} max={1.2} step={0.01} onChange={setTemperature}/><Range label="Top P" value={topP} min={0.1} max={1} step={0.01} onChange={setTopP}/><Range label="Top K" value={topK} min={1} max={100} step={1} onChange={setTopK}/><Range label="Max tokens" value={maxTokens} min={32} max={2048} step={32} onChange={setMaxTokens}/><div className="playground-note">Active persona: <strong>{persona.name}</strong></div></div><div className="prompt-card"><label>Prompt<textarea value={prompt} onChange={e=>setPrompt(e.target.value)} placeholder="Try a prompt…"/></label><div className="tool-row"><button className="secondary" onClick={()=>{setPrompt('');toast('Prompt cleared')}}>Clear</button><button className="primary" disabled={!model||!prompt.trim()} onClick={()=>toast(`Run from Chat with ${temperature.toFixed(2)} temperature`)}><Zap size={14}/> Test settings</button></div></div></div></div> }
+function Range({label,value,min,max,step,onChange}:{label:string;value:number;min:number;max:number;step:number;onChange:(n:number)=>void}) { return <label className="range-row"><div><span>{label}</span><b>{value}</b></div><input type="range" value={value} min={min} max={max} step={step} onChange={e=>onChange(Number(e.target.value))}/></label> }
+
+function KnowledgePage({docs,add,remove,toast}:{docs:KnowledgeDoc[];add:()=>void;remove:(id:string)=>void;toast:(s:string)=>void}) { const [q,setQ]=useState(''); const hits=docs.flatMap(d=>d.content.toLowerCase().includes(q.toLowerCase())? [d]:[]); return <div className="page"><div className="page-title"><div><span className="eyebrow">LOCAL KNOWLEDGE</span><h1>Knowledge</h1><p>Lightweight on-device text retrieval. No embeddings or cloud index required.</p></div><button className="primary" onClick={add}><FolderOpen size={15}/> Add files</button></div><div className="knowledge-search"><Search size={15}/><input placeholder="Search indexed files" value={q} onChange={e=>setQ(e.target.value)}/><span>{q?`${hits.length} matches`: `${docs.length} files`}</span></div><div className="doc-list">{docs.map(d=><div className="doc-row" key={d.id}><FileText size={17}/><div><strong>{d.name}</strong><span>{d.size} · searchable locally</span></div><button className="icon-btn" onClick={()=>remove(d.id)} title="Remove"><Trash2 size={15}/></button></div>)}{!docs.length&&<EmptyCard title="Build a small knowledge shelf" text="Add text and code files. Synth can use keyword retrieval without a separate database service." action={add}/>}</div>{q&&hits.length>0&&<div className="knowledge-results"><h3>Matches</h3>{hits.slice(0,5).map(d=><button key={d.id} className="match" onClick={()=>toast(`${d.name} selected`)}><strong>{d.name}</strong><span>{d.content.slice(0,180).replaceAll('\n',' ')}…</span></button>)}</div>}</div> }
+
+function SettingsPage({dark,setDark,stats,models,selected,setSelected,toast}:{dark:boolean;setDark:(b:boolean)=>void;stats:SystemStats|null;models:Model[];selected:string;setSelected:(s:string)=>void;toast:(s:string)=>void}) { const [dir,setDir]=useState(load('synth.modelDir','')); const [context,setContext]=useState(load('synth.context',4096)); const [cpu,setCpu]=useState(load('synth.cpuThreads',0)); return <div className="page settings"><div className="page-title"><div><span className="eyebrow">SYSTEM</span><h1>Settings</h1><p>Keep the runtime lean and the data on this machine.</p></div></div><SettingGroup title="Appearance"><SettingLine icon={dark?<Moon/>:<Sun/>} title="Theme" description="Light is the default. Dark is available for long sessions."><div className="segmented"><button className={!dark?'selected':''} onClick={()=>setDark(false)}>Light</button><button className={dark?'selected':''} onClick={()=>setDark(true)}>Dark</button></div></SettingLine></SettingGroup><SettingGroup title="Runtime"><SettingLine icon={<Bot/>} title="Default model" description="Model used for new chats."><select value={selected} onChange={e=>{setSelected(e.target.value);toast('Default model updated')}}><option value="">None</option>{models.filter(m=>m.status==='ready').map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></SettingLine><SettingLine icon={<Gauge/>} title="Default context" description="Keep context bounded to protect RAM."><input className="small-input" type="number" min="512" max="8192" step="256" value={context} onChange={e=>{const n=Number(e.target.value);setContext(n);localStorage.setItem('synth.context',JSON.stringify(n))}}/></SettingLine><SettingLine icon={<Cpu/>} title="CPU threads" description="0 = automatic. Candle will use the runtime's normal CPU path."><input className="small-input" type="number" min="0" max="64" value={cpu} onChange={e=>{const n=Number(e.target.value);setCpu(n);localStorage.setItem('synth.cpuThreads',JSON.stringify(n))}}/></SettingLine></SettingGroup><SettingGroup title="Storage"><SettingLine icon={<FolderOpen/>} title="Model directory" description="Stored as a preference; model files are never copied silently."><input className="wide-input" value={dir} onChange={e=>{setDir(e.target.value);localStorage.setItem('synth.modelDir',JSON.stringify(e.target.value))}} placeholder="Choose or type a local folder"/></SettingLine><SettingLine icon={<Download/>} title="Export / import data" description="Conversations and preferences live in local browser storage. Use chat export for portable copies."><button className="secondary" onClick={()=>toast('Use Export from a chat to create a Markdown copy')}>Learn</button></SettingLine></SettingGroup><SettingGroup title="Diagnostics"><SettingLine icon={<Activity/>} title="System monitor" description="Live host and app statistics from the Rust sidecar."><div className="diag"><span>CPU {stats?Math.round(stats.cpu_usage):'—'}%</span><span>RAM {stats?`${Math.round(stats.memory_used_mb)}/${Math.round(stats.memory_total_mb)} MB`:'—'}</span><span>App {stats?`${Math.round(stats.process_memory_mb)} MB`:'—'}</span></div></SettingLine><SettingLine icon={<Zap/>} title="Acceleration" description={stats?.gpu_note||'CPU backend is always available. Optional GPU features are built separately.'}><span className="status-badge">{stats?.gpu_available?'Available':'CPU default'}</span></SettingLine></SettingGroup><SettingGroup title="Privacy"><SettingLine icon={<Check/>} title="Local-first" description="No account, no cloud inference, and no mandatory network connection."><span className="privacy-lock">✓ Local</span></SettingLine><SettingLine icon={<Archive/>} title="Clear local chats" description="Delete saved conversations from this application."><button className="danger-mini" onClick={()=>{localStorage.removeItem('synth.chats');toast('Chats cleared — reload to reset the active view')}}><Trash2 size={13}/> Clear</button></SettingLine></SettingGroup></div> }
+function SettingGroup({title,children}:{title:string;children:React.ReactNode}) { return <section className="setting-group"><h2>{title}</h2>{children}</section> }
+function SettingLine({icon,title,description,children}:{icon:React.ReactNode;title:string;description:string;children:React.ReactNode}) { return <div className="setting-line"><div className="setting-icon">{icon}</div><div className="setting-copy"><strong>{title}</strong><span>{description}</span></div><div className="setting-control">{children}</div></div> }
+function CommandPalette({close,go,newChat}:{close:()=>void;go:(p:Page)=>void;newChat:()=>void}) { const items:[string,Page,React.ReactNode][]=[['Chat','Chat',<MessageSquarePlus size={15}/>],['Models','Models',<Library size={15}/>],['Personas','Personas',<UsersRound size={15}/>],['Synth Lab','Lab',<Activity size={15}/>],['Playground','Playground',<Command size={15}/>],['Knowledge','Knowledge',<Archive size={15}/>],['Settings','Settings',<Settings size={15}/>]]; return <div className="modal-scrim" onMouseDown={close}><div className="command-modal" onMouseDown={e=>e.stopPropagation()}><div className="command-head"><Command size={16}/><input autoFocus placeholder="Go to…"/><button className="icon-btn" onClick={close}><X size={15}/></button></div>{items.map(([label,page,icon])=><button className="command-item" key={label} onClick={()=>go(page)}>{icon}<span>{label}</span><ArrowUpRight size={13}/></button>)}<button className="command-item" onClick={newChat}><Plus size={15}/><span>New chat</span><kbd>Ctrl N</kbd></button><div className="command-foot"><Keyboard size={13}/> Ctrl + Space opens this palette</div></div></div> }
+function EmptyCard({title,text,action}:{title:string;text:string;action:()=>void}) { return <div className="empty-card"><div className="round-icon"><Sparkles size={17}/></div><h3>{title}</h3><p>{text}</p><button className="secondary" onClick={action}>Get started</button></div> }
+
+createRoot(document.getElementById('root')!).render(<App />);
