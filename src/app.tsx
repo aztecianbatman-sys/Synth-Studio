@@ -5,7 +5,6 @@ import { listen } from '@tauri-apps/api/event';
 import { open, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Bot, Check, ChevronDown, Copy, Download, FilePlus2, History, Menu, MessageSquare, Moon, Paperclip, Plus, Search, Send, Settings, Sparkles, Sun, Trash2, Upload, UserRound, X } from 'lucide-react';
-import './styles.css';
 
 type Page = 'home' | 'chat' | 'models' | 'settings';
 type Message = { id:string; role:'user'|'assistant'; content:string; time:string; stats?:string };
