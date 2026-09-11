@@ -27,6 +27,46 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      - name: Generate Windows ICO from Synth PNG
+        shell: pwsh
+        run: |
+          $pngPath = "src-tauri/icons/icon.png"
+          $icoPath = "src-tauri/icons/icon.ico"
+          if (-not (Test-Path $pngPath)) {
+            throw "Synth PNG icon not found: $pngPath"
+          }
+
+          $png = [System.IO.File]::ReadAllBytes($pngPath)
+          if ($png.Length -lt 24) {
+            throw "Synth PNG icon is invalid or too small."
+          }
+
+          $width = [BitConverter]::ToUInt32($png, 16)
+          $height = [BitConverter]::ToUInt32($png, 20)
+          if ($width -gt 256) { $width = 0 }
+          if ($height -gt 256) { $height = 0 }
+
+          $ms = New-Object System.IO.MemoryStream
+          $bw = New-Object System.IO.BinaryWriter($ms)
+          $bw.Write([UInt16]0)    # reserved
+          $bw.Write([UInt16]1)    # icon type
+          $bw.Write([UInt16]1)    # image count
+          $bw.Write([Byte]($width -band 0xFF))
+          $bw.Write([Byte]($height -band 0xFF))
+          $bw.Write([Byte]0)      # palette
+          $bw.Write([Byte]0)      # reserved
+          $bw.Write([UInt16]0)    # color planes
+          $bw.Write([UInt16]32)   # bit depth
+          $bw.Write([UInt32]$png.Length)
+          $bw.Write([UInt32]22)   # PNG payload offset
+          $bw.Write($png)
+          $bw.Flush()
+          [System.IO.File]::WriteAllBytes($icoPath, $ms.ToArray())
+          $bw.Dispose()
+          $ms.Dispose()
+
+          Write-Host "Generated $icoPath from $pngPath ($([math]::Round((Get-Item $icoPath).Length / 1KB, 1)) KB)"
+
       - name: Build Tauri application
         run: npm run tauri build -- --bundles nsis
 
