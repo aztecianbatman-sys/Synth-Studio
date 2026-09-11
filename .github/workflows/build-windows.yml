@@ -27,13 +27,18 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      - name: Verify Synth icon assets
+      - name: Generate official Tauri icon set
         shell: pwsh
         run: |
-          $files = @("src-tauri/icons/icon.png", "src-tauri/icons/icon.ico", "public/synth-logo.png")
-          foreach ($file in $files) {
-            if (-not (Test-Path $file)) { throw "Missing required icon asset: $file" }
-            Write-Host "$file OK"
+          if (Test-Path "src-tauri/icons/icon.ico") {
+            Remove-Item "src-tauri/icons/icon.ico" -Force
+          }
+          if (Test-Path "src-tauri/icons/icon.icns") {
+            Remove-Item "src-tauri/icons/icon.icns" -Force
+          }
+          npx tauri icon "public/synth-logo.png" -o "src-tauri/icons"
+          if (-not (Test-Path "src-tauri/icons/icon.ico")) {
+            throw "Tauri did not generate icon.ico"
           }
 
       - name: Build Tauri application
