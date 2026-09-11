@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import './styles.css';
 import { Bot, Check, ChevronDown, Copy, Download, FilePlus2, History, Menu, MessageSquare, Moon, Paperclip, Plus, Search, Send, Settings, Sparkles, Sun, Trash2, Upload, UserRound, X } from 'lucide-react';
 
 type Page = 'home' | 'chat' | 'models' | 'settings';
@@ -94,8 +95,8 @@ function App(){
   </div>
 }
 
-function Home({models,model,importModel,continueChat,settings}:{models:Model[];model?:Model;importModel:()=>Promise<void>;continueChat:()=>void;settings:()=>void}){
-  return <section className="home"><div className="home-top"><Brand/><button className="home-settings" onClick={settings}><Settings size={15}/>Settings</button></div><div className="home-center"><img className="hero-logo" src="/synth-logo.png"/><h1>Welcome to Synth Studio</h1><p>Your local AI studio. Start with a model on your device.</p><div className="model-launch"><button className="launch-model" onClick={()=>void importModel()}><Upload size={16}/><span><strong>{model?.name||'Choose a model'}</strong><small>{model?'Ready on this device':'Import a GGUF model to begin'}</small></span><ChevronDown size={16}/></button>{model&&<button className="continue-btn" onClick={continueChat}>Continue</button>}</div><div className="home-rule"/><div className="home-status"><span><i className={model?'good':''}/>{model?'Model ready':'No model loaded'}</span><span>{models.length} local model{models.length===1?'':'s'}</span><span>Candle · on device</span></div></div></section>
+function Home({models,model,importModel,continueChat,settings}:{models:Model[];model?:Model;importModel:()=>void;continueChat:()=>void;settings:()=>void}){
+  return <section className="home"><header className="home-top"><Brand/><button className="home-settings" onClick={settings}><Settings size={15}/><span>Settings</span></button></header><div className="home-center"><img className="hero-logo" src="/synth-logo.png" alt="Synth"/><h1>How can I help?</h1><p>Local AI, right on your device.</p><div className="launch-line"><button className="launch-model" onClick={()=>void importModel()}><span className="launch-model-icon"><Upload size={14}/></span><span className="launch-copy"><strong>{model?.name||'Choose a model'}</strong><small>{model?'Ready on this device':'Import a GGUF model to begin'}</small></span><ChevronDown size={14}/></button>{model&&<button className="continue-btn" onClick={continueChat}>Continue</button>}</div><div className="home-status"><span><i className={model?'good':''}/>{model?'Model ready':'No model loaded'}</span><span>{models.length} local model{models.length===1?'':'s'}</span><span>Candle · on device</span></div></div></section>
 }
 function Brand(){return <div className="brand"><img src="/synth-logo.png"/><div><strong>Synth Studio</strong><span>by Fulltrack</span></div></div>}
 function Sidebar(p:{open:boolean;setOpen:(b:boolean)=>void;search:string;setSearch:(s:string)=>void;recent:Chat[];activeId:string;setActiveId:(id:string)=>void;page:Page;setPage:(p:Page)=>void;newChat:()=>void;models:Model[];selected:string}){
