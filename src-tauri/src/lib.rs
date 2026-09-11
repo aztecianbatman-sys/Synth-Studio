@@ -129,7 +129,7 @@ fn load_tokenizer(content: &gguf_file::Content, model_path: &Path) -> Result<Tok
         use tokenizers::{models::bpe::BPE, pre_tokenizers::byte_level::ByteLevel as ByteLevelPreTokenizer, decoders::byte_level::ByteLevel as ByteLevelDecoder};
         let tokens = content.metadata.get("tokenizer.ggml.tokens").context("GGUF GPT-2 tokenizer tokens are missing")?.to_vec()?;
         let merges = content.metadata.get("tokenizer.ggml.merges").context("GGUF GPT-2 tokenizer merges are missing")?.to_vec()?;
-        let vocab = tokens.iter().enumerate().map(|(id, v)| Ok((v.to_string()?.clone(), id as u32))).collect::<Result<std::collections::HashMap<_, _>>>()?;
+        let vocab = tokens.iter().enumerate().map(|(id, v)| Ok((v.to_string()?.clone(), id as u32))).collect::<Result<ahash::AHashMap<_, _>>>()?;
         let merge_pairs = merges.iter().map(|v| {
             let raw = v.to_string()?;
             let mut parts = raw.splitn(2, ' ');
@@ -137,7 +137,7 @@ fn load_tokenizer(content: &gguf_file::Content, model_path: &Path) -> Result<Tok
             let right = parts.next().context("Malformed GGUF BPE merge")?.to_string();
             Ok((left, right))
         }).collect::<Result<Vec<_>>>()?;
-        let bpe = BPE::builder().vocab_and_merges(vocab, merge_pairs).fuse_unk(true).build()?;
+        let bpe = BPE::builder().vocab_and_merges(vocab, merge_pairs).fuse_unk(true).build().map_err(|e| anyhow::anyhow!(e.to_string()))?;
         let mut tokenizer = Tokenizer::new(bpe);
         tokenizer.with_pre_tokenizer(Some(ByteLevelPreTokenizer::default()));
         tokenizer.with_decoder(Some(ByteLevelDecoder::default()));
@@ -184,7 +184,6 @@ fn start_generation(app: AppHandle, state: State<'_, EngineState>, request: Gene
 
 fn generate_inner(app: &AppHandle, cancel: &AtomicBool, cfg: GenerationConfig) -> Result<GenerationResult> {
     let path = Path::new(&cfg.model_path);
-    let meta = fs::metadata(path)?;
     let device = select_device();
     let (mut model, tokenizer) = load_llama(path, &device)?;
     let encoded = tokenizer.encode(cfg.prompt.as_str(), true).map_err(|e| anyhow::anyhow!(e.to_string()))?;
