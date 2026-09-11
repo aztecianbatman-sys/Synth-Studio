@@ -63,10 +63,10 @@ pub struct GenerationConfig {
 struct TokenEvent { request_id: String, text: String }
 
 #[tauri::command]
-pub fn engine_status() -> String { "Candle Rust engine ready".into() }
+fn engine_status() -> String { "Candle Rust engine ready".into() }
 
 #[tauri::command]
-pub fn system_stats() -> SystemStats {
+fn system_stats() -> SystemStats {
     let mut system = System::new_all();
     system.refresh_all();
     let total = system.total_memory() / 1024 / 1024;
@@ -80,7 +80,7 @@ pub fn system_stats() -> SystemStats {
 }
 
 #[tauri::command]
-pub fn inspect_model(path: String) -> Result<ModelInfo, String> { inspect_model_inner(Path::new(&path)).map_err(|e| e.to_string()) }
+fn inspect_model(path: String) -> Result<ModelInfo, String> { inspect_model_inner(Path::new(&path)).map_err(|e| e.to_string()) }
 
 fn inspect_model_inner(path: &Path) -> Result<ModelInfo> {
     if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")) != Some(true) { bail!("Synth Studio accepts GGUF model files."); }
@@ -138,10 +138,10 @@ fn make_sampling(temperature: f64, top_p: f64, top_k: usize, seed: u64) -> Logit
 }
 
 #[tauri::command]
-pub fn cancel_generation(state: State<'_, EngineState>) -> bool { state.cancel.store(true, Ordering::SeqCst); true }
+fn cancel_generation(state: State<'_, EngineState>) -> bool { state.cancel.store(true, Ordering::SeqCst); true }
 
 #[tauri::command]
-pub fn start_generation(app: AppHandle, state: State<'_, EngineState>, request: GenerationConfig) -> Result<GenerationResult, String> {
+fn start_generation(app: AppHandle, state: State<'_, EngineState>, request: GenerationConfig) -> Result<GenerationResult, String> {
     state.cancel.store(false, Ordering::SeqCst);
     generate_inner(&app, &state.cancel, request).map_err(|e| e.to_string())
 }
