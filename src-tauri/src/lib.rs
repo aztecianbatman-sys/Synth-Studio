@@ -8,7 +8,6 @@ use sysinfo::System;
 use tauri::{AppHandle, Emitter, State};
 use tokenizers::Tokenizer;
 
-const MAX_MODEL_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Default)]
 pub struct EngineState { cancel: Arc<AtomicBool> }
@@ -86,21 +85,30 @@ fn inspect_model_inner(path: &Path) -> Result<ModelInfo> {
     if path.extension().and_then(|s| s.to_str()).map(|s| s.eq_ignore_ascii_case("gguf")) != Some(true) { bail!("Synth Studio accepts GGUF model files."); }
     let meta = fs::metadata(path).with_context(|| format!("cannot read {}", path.display()))?;
     if !meta.is_file() { bail!("Selected model is not a file."); }
-    if meta.len() > MAX_MODEL_BYTES { bail!("Model exceeds Synth Studio's 2 GB lightweight model limit."); }
     let mut file = File::open(path)?;
     let content = gguf_file::Content::read(&mut file)?;
     let architecture = content.metadata.get("general.architecture").and_then(|v| v.to_string().ok()).cloned().unwrap_or_else(|| "unknown".into());
     let quantization = content.metadata.get("general.file_type").and_then(|v| v.to_string().ok()).cloned().unwrap_or_else(|| "GGUF".into());
     let context = content.metadata.get(&format!("{}.context_length", architecture)).and_then(|v| v.to_u64().ok()).map(|v| v as usize).unwrap_or(4096);
     let parameter_count = content.metadata.get("general.parameter_count").and_then(|v| v.to_u64().ok()).map(format_count);
-    let tokenizer = if has_embedded_tokenizer(&content) { "embedded" } else if sidecar_tokenizer(path).is_some() { "sidecar" } else { "missing" };
-    let status = if architecture.eq_ignore_ascii_case("llama") { if tokenizer == "missing" { "missing" } else { "ready" } } else { "unsupported" };
+    let tokenizer = tokenizer_source(&content, path);
+    let status = if architecture.eq_ignore_ascii_case("llama") {
+        if tokenizer == "missing" { "missing" } else { "ready" }
+    } else { "unsupported" };
     let name = content.metadata.get("general.name").and_then(|v| v.to_string().ok()).cloned().unwrap_or_else(|| path.file_stem().and_then(|s| s.to_str()).unwrap_or("GGUF model").into());
     Ok(ModelInfo { id: format!("{}-{}", meta.len(), path.display()), name, path: path.display().to_string(), size: format_size(meta.len()), bytes: meta.len(), architecture, quantization, context, status: status.into(), parameter_count, tokenizer: tokenizer.into() })
 }
 
-fn has_embedded_tokenizer(content: &gguf_file::Content) -> bool {
-    ["tokenizer.huggingface.json", "tokenizer.ggml.hf_json", "tokenizer.huggingface.tokenizer_json"].iter().any(|key| content.metadata.get(*key).and_then(|v| v.to_string().ok()).is_some())
+fn tokenizer_source(content: &gguf_file::Content, model_path: &Path) -> &'static str {
+    if ["tokenizer.huggingface.json", "tokenizer.ggml.hf_json", "tokenizer.huggingface.tokenizer_json"]
+        .iter().any(|key| content.metadata.get(*key).and_then(|v| v.to_string().ok()).is_some())
+    { return "embedded"; }
+    let kind = content.metadata.get("tokenizer.ggml.model")
+        .and_then(|v| v.to_string().ok()).map(|v| v.to_lowercase()).unwrap_or_default();
+    if kind == "gpt2" && content.metadata.contains_key("tokenizer.ggml.tokens") && content.metadata.contains_key("tokenizer.ggml.merges") {
+        return "embedded";
+    }
+    if sidecar_tokenizer(model_path).is_some() { "sidecar" } else { "missing" }
 }
 fn sidecar_tokenizer(model_path: &Path) -> Option<PathBuf> {
     let parent = model_path.parent().unwrap_or_else(|| Path::new("."));
@@ -109,10 +117,38 @@ fn sidecar_tokenizer(model_path: &Path) -> Option<PathBuf> {
 }
 fn load_tokenizer(content: &gguf_file::Content, model_path: &Path) -> Result<Tokenizer> {
     for key in ["tokenizer.huggingface.json", "tokenizer.ggml.hf_json", "tokenizer.huggingface.tokenizer_json"] {
-        if let Some(json) = content.metadata.get(key).and_then(|v| v.to_string().ok()) { return Tokenizer::from_bytes(json.as_bytes()).map_err(|e| anyhow::anyhow!(e.to_string())); }
+        if let Some(json) = content.metadata.get(key).and_then(|v| v.to_string().ok()) {
+            return Tokenizer::from_bytes(json.as_bytes()).map_err(|e| anyhow::anyhow!(e.to_string()));
+        }
     }
-    if let Some(sidecar) = sidecar_tokenizer(model_path) { return Tokenizer::from_file(sidecar).map_err(|e| anyhow::anyhow!(e.to_string())); }
-    bail!("No tokenizer found. Put tokenizer.json beside the GGUF (or <model>.tokenizer.json) and retry.")
+
+    let kind = content.metadata.get("tokenizer.ggml.model")
+        .and_then(|v| v.to_string().ok()).map(|v| v.to_lowercase()).unwrap_or_default();
+
+    if kind == "gpt2" {
+        use tokenizers::{models::bpe::BPE, pre_tokenizers::byte_level::ByteLevel as ByteLevelPreTokenizer, decoders::byte_level::ByteLevel as ByteLevelDecoder};
+        let tokens = content.metadata.get("tokenizer.ggml.tokens").context("GGUF GPT-2 tokenizer tokens are missing")?.to_vec()?;
+        let merges = content.metadata.get("tokenizer.ggml.merges").context("GGUF GPT-2 tokenizer merges are missing")?.to_vec()?;
+        let vocab = tokens.iter().enumerate().map(|(id, v)| Ok((v.to_string()?.clone(), id as u32))).collect::<Result<std::collections::HashMap<_, _>>>()?;
+        let merge_pairs = merges.iter().map(|v| {
+            let raw = v.to_string()?;
+            let mut parts = raw.splitn(2, ' ');
+            let left = parts.next().unwrap_or_default().to_string();
+            let right = parts.next().context("Malformed GGUF BPE merge")?.to_string();
+            Ok((left, right))
+        }).collect::<Result<Vec<_>>>()?;
+        let bpe = BPE::builder().vocab_and_merges(vocab, merge_pairs).fuse_unk(true).build()?;
+        let mut tokenizer = Tokenizer::new(bpe);
+        tokenizer.with_pre_tokenizer(Some(ByteLevelPreTokenizer::default()));
+        tokenizer.with_decoder(Some(ByteLevelDecoder::default()));
+        return Ok(tokenizer);
+    }
+
+    if let Some(sidecar) = sidecar_tokenizer(model_path) {
+        return Tokenizer::from_file(sidecar).map_err(|e| anyhow::anyhow!(e.to_string()));
+    }
+
+    bail!("No compatible tokenizer found. GGUF must contain a supported tokenizer or tokenizer.json must sit beside the model.")
 }
 fn format_count(n: u64) -> String { if n >= 1_000_000_000 { format!("{:.1}B", n as f64 / 1e9) } else if n >= 1_000_000 { format!("{:.1}M", n as f64 / 1e6) } else if n >= 1_000 { format!("{:.1}K", n as f64 / 1e3) } else { n.to_string() } }
 fn format_size(bytes: u64) -> String { if bytes >= 1024 * 1024 * 1024 { format!("{:.2} GB", bytes as f64 / 1024_f64.powi(3)) } else { format!("{:.1} MB", bytes as f64 / 1024_f64.powi(2)) } }
@@ -149,13 +185,12 @@ fn start_generation(app: AppHandle, state: State<'_, EngineState>, request: Gene
 fn generate_inner(app: &AppHandle, cancel: &AtomicBool, cfg: GenerationConfig) -> Result<GenerationResult> {
     let path = Path::new(&cfg.model_path);
     let meta = fs::metadata(path)?;
-    if meta.len() > MAX_MODEL_BYTES { bail!("Model exceeds 2 GB."); }
     let device = select_device();
     let (mut model, tokenizer) = load_llama(path, &device)?;
     let encoded = tokenizer.encode(cfg.prompt.as_str(), true).map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let mut prompt_tokens = encoded.get_ids().to_vec();
-    let context = cfg.context_length.clamp(512, 8192);
-    let max_tokens = cfg.max_tokens.clamp(1, 2048);
+    let context = cfg.context_length.max(512);
+    let max_tokens = cfg.max_tokens.max(1);
     if prompt_tokens.len() + max_tokens >= context { prompt_tokens.truncate(context.saturating_sub(max_tokens + 1)); }
     let mut sampler = make_sampling(cfg.temperature, cfg.top_p, cfg.top_k, cfg.seed);
     let vocab = tokenizer.get_vocab(true);
